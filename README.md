@@ -1,4 +1,4 @@
-# ShotgunBlackbox Moto Dashboard
+# Shotgun Moto Dashboard
 
 Expo SDK 54 Dashboard fuer echte Live-Daten am Bike. Die App zeigt Map, Route, Speed, Lean/Pitch, Hoehenmeter, Wetter, editierbare Widgets und Diagramme pro Statistik.
 
