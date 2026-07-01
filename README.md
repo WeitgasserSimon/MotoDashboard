@@ -1,58 +1,61 @@
 # ShotgunBlackbox Moto Dashboard
 
-Diese App ist ein Expo SDK 54 Test-Dashboard fuer echte Live-Daten vom iPhone. Sie zeigt eine echte Map, zeichnet die GPS-Route auf und berechnet Motorrad-nahe Telemetrie wie Lean Angle, Speed, Distanz, Heading und Ride Time.
+Expo SDK 54 Dashboard fuer echte Live-Daten am Bike. Die App zeigt Map, Route, Speed, Lean/Pitch, Hoehenmeter, Wetter, editierbare Widgets und Diagramme pro Statistik.
 
-## Umgesetzte Schritte
+## Features
 
-1. Expo SDK 54 Doku geprueft:
-   - `https://docs.expo.dev/versions/v54.0.0/sdk/devicemotion/`
-   - `https://docs.expo.dev/versions/v54.0.0/sdk/location/`
-   - `https://docs.expo.dev/versions/v54.0.0/sdk/map-view/`
-2. SDK-passende Pakete installiert:
-   - `expo-sensors` fuer `DeviceMotion`
-   - `expo-location` fuer GPS, Speed, Position und Heading
-   - `react-native-maps` fuer die echte Live-Map in Expo Go
-3. `app.json` erweitert:
-   - `expo-location` Permission-Text fuer Standortzugriff
-   - `expo-sensors` Permission-Text fuer Motion-Zugriff
-4. `App.tsx` von Platzhalterdaten auf Live-Daten umgebaut:
-   - keine ScrollView mehr, fixiertes Dashboard-Layout
-   - echte Map statt Fake-Map
-   - `watchPositionAsync` fuer fortlaufende GPS-Updates
-   - `watchHeadingAsync` fuer Kompass-Heading
-   - `DeviceMotion.addListener` fuer iPhone Motion-Daten
-   - Live-Route als `Polyline`
-   - Live-Marker an der aktuellen Position
-5. Berechnungen eingebaut:
-   - Speed direkt aus GPS `coords.speed`
-   - Speed-Fallback aus GPS-Distanz pro Zeit
-   - Distanz per Haversine-Formel
-   - Lean Angle aus `DeviceMotion.rotation.gamma`
-   - Lean-Fallback aus Beschleunigung inklusive Gravitation
-   - Max Lean, Last Corner Lean, Top Speed und Ride Time
-6. Controls eingebaut:
-   - `Calibrate lean` setzt die aktuelle iPhone-Montageposition als 0 Grad
-   - `Reset ride` setzt Route, Distanz, Max-Werte und Timer zurueck
-7. Validierung:
-   - `npx tsc --noEmit`
+1. Live Ride Dashboard:
+   - GPS Route mit `react-native-maps`
+   - Speed aus `coords.speed`, Fallback per GPS-Distanz/Zeit
+   - Lean und Pitch aus `DeviceMotion` mit geglaetteten, kalibrierbaren Winkeln
+   - Distanz, Top Speed, GPS Qualitaet, Heading und Ride Time
+2. Hoehenmeter:
+   - aktuelle GPS-Hoehe
+   - Aufstieg und Abstieg aus Hoehendifferenzen
+   - gespeicherte Start- und Endwerte pro beendetem Ride
+3. Menue:
+   - Darkmode: System, Hell, Dunkel
+   - Widget Layout: 3 Spalten, 2 Spalten, Gross
+   - Widgets ein-/ausblenden und sortieren
+   - Kalibrier-Button fuer fest montiertes Handy am Bike
+   - Wetter Refresh
+4. Diagramme:
+   - Verlaeufe fuer Speed, Lean, Pitch, Distanz, Hoehe, Hoehenmeter, Heading, GPS Genauigkeit, Temperatur und Wind
+   - Diagramm-Reiter zeigt Live-Daten oder den zuletzt beendeten Ride
+5. Wetter:
+   - Open-Meteo API ohne API Key
+   - Temperatur, gefuehlte Temperatur, Wind, Boeen und Wetterzustand
+6. Persistenz:
+   - Darkmode, Layout, Widget-Reihenfolge, versteckte Widgets, Kalibrierung und letzter Ride werden mit AsyncStorage gespeichert
 
-## Live-Daten
+## Expo SDK 54 Doku
 
-Die App verwendet keine festen Fahrwerte mehr. Wenn GPS oder Motion noch nicht verfuegbar sind, zeigt die UI `--` oder den aktuellen Stream-Status. Reale Werte erscheinen erst nach iPhone-Permissions und Sensorupdates.
+Vor den Code-Aenderungen wurden die versionierten Expo-v54-Dokumente geprueft:
 
-## Testen auf dem iPhone
+- `https://docs.expo.dev/versions/v54.0.0/`
+- `https://docs.expo.dev/versions/v54.0.0/sdk/devicemotion/`
+- `https://docs.expo.dev/versions/v54.0.0/sdk/location/`
+- `https://docs.expo.dev/versions/v54.0.0/sdk/accelerometer/`
+- `https://docs.expo.dev/versions/v54.0.0/sdk/gyroscope/`
+- `https://docs.expo.dev/versions/v54.0.0/sdk/barometer/`
+- `https://docs.expo.dev/versions/v54.0.0/sdk/async-storage/`
 
-1. Expo starten:
-   ```bash
-   npm start
-   ```
-2. QR-Code mit Expo Go auf dem iPhone 13 scannen.
-3. Standort- und Motion-Permissions erlauben.
-4. Vor dem Fahren `Calibrate lean` druecken, wenn das iPhone fest montiert ist.
+## Testen
 
-## Hinweise
+```bash
+npm start
+```
 
-- `coords.speed` ist der bevorzugte Speed-Wert, weil er direkt vom GPS kommt.
-- Wenn `coords.speed` kurz nicht geliefert wird, berechnet die App Speed aus der Distanz zwischen zwei GPS-Punkten und der Zeitdifferenz.
-- Hintergrundtracking ist nicht aktiv. Die App misst live, solange sie im Vordergrund laeuft.
-- Fuer App-Store-Builds sind die Permission-Texte bereits in `app.json` vorbereitet.
+Oder direkt mit dem aktuell gestarteten Metro-Server:
+
+```text
+http://localhost:8083
+```
+
+Auf dem iPhone mit Expo Go scannen, Standort- und Motion-Permissions erlauben und nach dem Einschnallen des Handys `Sensoren kalibrieren` druecken.
+
+## Validierung
+
+```bash
+npx tsc --noEmit
+```
