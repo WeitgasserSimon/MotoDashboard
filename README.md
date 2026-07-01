@@ -1,4 +1,4 @@
-# ShotgunBlackbox Moto Dashboard
+# Shotgun Moto Dashboard
 
 Diese App ist ein Expo SDK 54 Test-Dashboard fuer echte Live-Daten vom iPhone. Sie zeigt eine echte Map, zeichnet die GPS-Route auf und berechnet Motorrad-nahe Telemetrie wie Lean Angle, Speed, Distanz, Heading und Ride Time.
 
