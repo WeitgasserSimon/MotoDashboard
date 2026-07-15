@@ -244,7 +244,6 @@ const styles = StyleSheet.create({
   angleButtons: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
     marginTop: 8,
   },
   angleButton: {
@@ -254,6 +253,8 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     minWidth: 50,
     alignItems: 'center',
+    marginRight: 8,
+    marginBottom: 8,
   },
   angleButtonActive: {
     backgroundColor: '#60a5fa',

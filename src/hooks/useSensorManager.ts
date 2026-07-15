@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DeviceMotion, type DeviceMotionMeasurement } from 'expo-sensors';
 import { SensorFusionEngine, type LeanAngleData, type CalibrationData, LowPassFilter } from '../sensors/SensorFusion';
 
+export type { CalibrationData } from '../sensors/SensorFusion';
 export type SensorStatus = 'starting' | 'live' | 'denied' | 'unavailable' | 'error';
 
 export interface SensorManagerState {
@@ -22,6 +23,7 @@ export interface SensorManagerActions {
   calibrate: () => void;
   resetCalibration: () => void;
   resetMaxValues: () => void;
+  setCalibration: (calibration: CalibrationData) => void;
 }
 
 const UPDATE_INTERVAL_MS = 50; // 20Hz for smooth updates
@@ -81,6 +83,13 @@ export function useSensorManager(): [SensorManagerState, SensorManagerActions] {
     setMaxPitch(0);
     setLastCornerLean(null);
     
+    leanFilterRef.current.reset();
+    pitchFilterRef.current.reset();
+  }, []);
+
+  const setCalibrationState = useCallback((nextCalibration: CalibrationData) => {
+    setCalibration(nextCalibration);
+    engineRef.current.resetCalibration();
     leanFilterRef.current.reset();
     pitchFilterRef.current.reset();
   }, []);
@@ -214,6 +223,7 @@ export function useSensorManager(): [SensorManagerState, SensorManagerActions] {
     calibrate,
     resetCalibration,
     resetMaxValues,
+    setCalibration: setCalibrationState,
   };
 
   return [state, actions];

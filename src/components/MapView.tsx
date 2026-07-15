@@ -1,12 +1,16 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, StyleSheet, ActivityIndicator, Text, Pressable } from 'react-native';
 import MapView, { Marker, Polyline, type LatLng, type Region } from 'react-native-maps';
+import type { GestureResponderEvent } from 'react-native';
 import * as Location from 'expo-location';
 
 interface MotorcycleMapProps {
   currentLocation: Location.LocationObject | null;
   route: LatLng[];
+  navigationRoute?: LatLng[];
   followMode: boolean;
+  navigationActive?: boolean;
+  onMapLongPress?: (coordinate: LatLng) => void;
   onRegionChange?: (region: Region) => void;
   onFollowModeToggle?: () => void;
   zoomLevel?: number;
@@ -16,6 +20,9 @@ export function MotorcycleMap({
   currentLocation, 
   route, 
   followMode, 
+  navigationActive = false,
+  navigationRoute = [],
+  onMapLongPress,
   onRegionChange, 
   onFollowModeToggle,
   zoomLevel = 16
@@ -86,6 +93,16 @@ export function MotorcycleMap({
     }
   }, [followMode, onFollowModeToggle]);
 
+  const handleLongPress = useCallback(
+    (event: any) => {
+      const { coordinate } = event.nativeEvent;
+      if (onMapLongPress) {
+        onMapLongPress(coordinate);
+      }
+    },
+    [onMapLongPress],
+  );
+
   if (!isReady || !initialRegion) {
     return (
       <View style={styles.loadingContainer}>
@@ -95,6 +112,9 @@ export function MotorcycleMap({
     );
   }
 
+  const routeColor = navigationActive ? '#22c55e' : '#60a5fa';
+  const routeLinePattern = navigationActive ? [10, 6] : undefined;
+
   return (
     <View style={styles.container}>
       <MapView
@@ -103,6 +123,7 @@ export function MotorcycleMap({
         initialRegion={initialRegion}
         region={currentRegion}
         onRegionChangeComplete={handleRegionChangeComplete}
+        onLongPress={handleLongPress}
         showsUserLocation={false}
         showsMyLocationButton={false}
         followsUserLocation={false}
@@ -114,6 +135,43 @@ export function MotorcycleMap({
         scrollEnabled={true}
         pitchEnabled={false}
       >
+        {route.length > 1 && (
+          <Polyline
+            coordinates={route}
+            strokeColor="#60a5fa"
+            strokeWidth={3}
+            lineCap="round"
+            lineJoin="round"
+          />
+        )}
+
+        {navigationRoute.length > 1 && (
+          <Polyline
+            coordinates={navigationRoute}
+            strokeColor={navigationActive ? '#22c55e' : '#60a5fa'}
+            strokeWidth={4}
+            lineCap="round"
+            lineJoin="round"
+            lineDashPattern={navigationActive ? undefined : [8, 5]}
+          />
+        )}
+
+        {navigationRoute.length > 0 && (
+          <Marker
+            coordinate={navigationRoute[0]}
+            title="Start"
+            pinColor={navigationActive ? '#34d399' : '#60a5fa'}
+          />
+        )}
+
+        {navigationRoute.length > 1 && (
+          <Marker
+            coordinate={navigationRoute[navigationRoute.length - 1]}
+            title="Ziel"
+            pinColor={navigationActive ? '#22c55e' : '#60a5fa'}
+          />
+        )}
+
         {currentCoordinate && (
           <Marker
             coordinate={currentCoordinate}
@@ -121,17 +179,7 @@ export function MotorcycleMap({
             description={currentLocation?.coords.speed 
               ? `${(currentLocation.coords.speed * 3.6).toFixed(0)} km/h`
               : 'Stehend'
-          }
-          />
-        )}
-        
-        {route.length > 1 && (
-          <Polyline
-            coordinates={route}
-            strokeColor="#60a5fa"
-            strokeWidth={4}
-            lineCap="round"
-            lineJoin="round"
+            }
           />
         )}
       </MapView>

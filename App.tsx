@@ -1,26 +1,31 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   useColorScheme,
+  useWindowDimensions,
+  PanResponder,
 } from 'react-native';
 import * as Location from 'expo-location';
 import { StatusBar } from 'expo-status-bar';
 import { type LatLng } from 'react-native-maps';
-import { useSensorManager } from './src/hooks/useSensorManager';
+import { useSensorManager, type CalibrationData } from './src/hooks/useSensorManager';
 import { LeanAngleGauge } from './src/components/LeanAngleGauge';
 import { DashboardCard } from './src/components/DashboardCard';
 import { MotorcycleMap } from './src/components/MapView';
 import { SensorDebugView } from './src/components/SensorDebugView';
 
-type ActivePanel = 'ride' | 'settings' | 'debug';
-type ViewMode = 'hybrid' | 'mapOnly' | 'dataOnly';
+type ViewMode = 'hybrid' | 'mapOnly' | 'dataOnly' | 'focused';
 type ThemeMode = 'system' | 'light' | 'dark';
+type AppScreen = 'dashboard' | 'map' | 'settings' | 'debug';
 
 const MAX_LEAN_DEGREES = 60;
 const ROUTE_POINT_LIMIT = 600;
@@ -131,6 +136,21 @@ function isThemeMode(value: unknown): value is ThemeMode {
   return value === 'system' || value === 'light' || value === 'dark';
 }
 
+function isCalibrationData(value: unknown): value is CalibrationData {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const calibration = value as CalibrationData;
+  return (
+    typeof calibration.leanOffset === 'number' &&
+    typeof calibration.pitchOffset === 'number' &&
+    typeof calibration.rollOffset === 'number' &&
+    typeof calibration.yawOffset === 'number' &&
+    typeof calibration.createdAt === 'number'
+  );
+}
+
 function safeDateTime(timestamp: number | null) {
   if (!timestamp) {
     return '--';
@@ -181,22 +201,168 @@ export default function App() {
   const [topSpeedKmh, setTopSpeedKmh] = useState(0);
   const [elevationGainMeters, setElevationGainMeters] = useState(0);
   const [elevationLossMeters, setElevationLossMeters] = useState(0);
-  const [activePanel, setActivePanel] = useState<ActivePanel>('ride');
   const [themeMode, setThemeMode] = useState<ThemeMode>('system');
   const [rideActive, setRideActive] = useState(true);
+  const [navigationActive, setNavigationActive] = useState(false);
+  const [navigationRoute, setNavigationRoute] = useState<LatLng[]>([]);
   const [storageLoaded, setStorageLoaded] = useState(false);
   const [followMode, setFollowMode] = useState(true);
+  const [destinationQuery, setDestinationQuery] = useState('');
+  const [destinationResults, setDestinationResults] = useState<Location.LocationGeocodedLocation[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [zoomLevel, setZoomLevel] = useState(16);
   const [viewMode, setViewMode] = useState<ViewMode>('hybrid');
-  const [mapDataRatio, setMapDataRatio] = useState(0.5); // 0 = full data, 1 = full map
   const [simulatedLeanAngle, setSimulatedLeanAngle] = useState<number | null>(null);
+  const [sheetVisible, setSheetVisible] = useState(true);
+  const [sheetSnapPosition, setSheetSnapPosition] = useState<'full' | 'half' | 'hidden'>('full');
+  const [currentSheetHeight, setCurrentSheetHeight] = useState(0);
+  const [appScreen, setAppScreen] = useState<AppScreen>('dashboard');
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const sheetHeight = useRef(new Animated.Value(0)).current;
 
   const lastLocationRef = useRef<Location.LocationObject | null>(null);
 
   // Use new sensor fusion system
   const [sensorState, sensorActions] = useSensorManager();
 
+  const sheetSnapHeights = useMemo(
+    () => ({
+      full: 0,
+      half: Math.max(0, screenHeight * 0.42),
+      hidden: Math.max(0, screenHeight * 0.82),
+    }),
+    [screenHeight],
+  );
+
+  useEffect(() => {
+    if (screenHeight <= 0) {
+      return;
+    }
+
+    const target = sheetSnapHeights[sheetSnapPosition];
+    setCurrentSheetHeight(target);
+    sheetHeight.setValue(target);
+  }, [screenHeight, sheetSnapHeights, sheetSnapPosition, sheetHeight]);
+
+  useEffect(() => {
+    switch (appScreen) {
+      case 'dashboard':
+        setViewMode('hybrid');
+        setSheetVisible(true);
+        setSheetSnapPosition('half');
+        break;
+      case 'map':
+        setViewMode('mapOnly');
+        setSheetVisible(false);
+        setSheetSnapPosition('hidden');
+        break;
+      case 'settings':
+        setViewMode('dataOnly');
+        setSheetVisible(true);
+        setSheetSnapPosition('half');
+        break;
+      case 'debug':
+        setViewMode('dataOnly');
+        setSheetVisible(true);
+        setSheetSnapPosition('half');
+        break;
+    }
+  }, [appScreen]);
+
+  useEffect(() => {
+    if (navigationActive) {
+      setFollowMode(true);
+    }
+  }, [navigationActive]);
+
   const currentCoordinate = location ? getCoordinate(location) : null;
+
+  const handleSetRouteDestination = useCallback(
+    (destination: LatLng) => {
+      if (!currentCoordinate) {
+        return;
+      }
+
+      setDestinationResults([]);
+      setNavigationRoute([currentCoordinate, destination]);
+      setNavigationActive(true);
+      setFollowMode(true);
+      setAppScreen('map');
+    },
+    [currentCoordinate],
+  );
+
+  const clearNavigationRoute = useCallback(() => {
+    setNavigationRoute([]);
+    setNavigationActive(false);
+    setDestinationResults([]);
+    setDestinationQuery('');
+    setSearchError(null);
+  }, []);
+
+  const formatAddressLabel = useCallback((address: Location.LocationGeocodedLocation) => {
+    const addressParts = [
+      (address as any).name,
+      (address as any).street,
+      (address as any).city,
+      (address as any).region,
+      (address as any).postalCode,
+      (address as any).country,
+    ].filter(Boolean);
+
+    return addressParts.join(', ');
+  }, []);
+
+  const selectDestinationResult = useCallback(
+    (result: Location.LocationGeocodedLocation) => {
+      if (result.latitude == null || result.longitude == null) {
+        return;
+      }
+
+      setDestinationQuery(formatAddressLabel(result));
+      setDestinationResults([]);
+      setSearchError(null);
+      handleSetRouteDestination({ latitude: result.latitude, longitude: result.longitude });
+    },
+    [formatAddressLabel, handleSetRouteDestination],
+  );
+
+  const searchNavigationDestination = useCallback(async () => {
+    const query = destinationQuery.trim();
+
+    if (!query) {
+      setSearchError('Bitte Ziel eingeben.');
+      return;
+    }
+
+    setSearchLoading(true);
+    setSearchError(null);
+
+    try {
+      const results = await Location.geocodeAsync(query);
+
+      if (results.length === 0) {
+        setSearchError('Kein Ziel gefunden.');
+        setDestinationResults([]);
+        return;
+      }
+
+      setDestinationResults(results.slice(0, 5));
+      Keyboard.dismiss();
+
+      const firstResult = results[0];
+
+      if (firstResult.latitude != null && firstResult.longitude != null) {
+        handleSetRouteDestination({ latitude: firstResult.latitude, longitude: firstResult.longitude });
+      }
+    } catch (error) {
+      setSearchError('Suche fehlgeschlagen.');
+      setDestinationResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [destinationQuery, handleSetRouteDestination]);
   const gpsSpeedMps =
     location?.coords.speed !== null && location?.coords.speed !== undefined && location.coords.speed >= 0
       ? location.coords.speed
@@ -299,8 +465,8 @@ export default function App() {
           setThemeMode(parsedState.themeMode);
         }
 
-        if (parsedState.calibration) {
-          sensorActions.resetCalibration();
+        if (isCalibrationData(parsedState.calibration)) {
+          sensorActions.setCalibration(parsedState.calibration);
         }
       } catch (error) {
         console.warn('Could not restore dashboard settings', error);
@@ -430,40 +596,242 @@ export default function App() {
   const isLeaningRight = (displayLeanAngle ?? 0) >= 0;
   const liveStatus = locationStatus === 'live' && sensorState.status === 'live' ? 'Live' : 'Setup';
 
+  const routeDistanceKm = navigationRoute.length > 1 ? getDistanceMeters(navigationRoute[0], navigationRoute[navigationRoute.length - 1]) / 1000 : 0;
+  const isMapScreen = appScreen === 'map';
+  const routeStatus = navigationActive ? 'Navigation aktiv' : navigationRoute.length > 1 ? 'Route Vorschau' : 'Ziel auswählen';
+
+  // PanResponder for scaleless sliding with snap positions
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return Math.abs(gestureState.dy) > 5;
+      },
+      onPanResponderGrant: () => {
+        sheetHeight.stopAnimation();
+      },
+      onPanResponderMove: (_, gestureState) => {
+        const newHeight = Math.max(0, currentSheetHeight + gestureState.dy);
+        setCurrentSheetHeight(newHeight);
+        sheetHeight.setValue(newHeight);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const velocity = gestureState.vy;
+
+        // Determine nearest snap position
+        let targetPosition: 'full' | 'half' | 'hidden';
+        const distances = {
+          full: Math.abs(currentSheetHeight - sheetSnapHeights.full),
+          half: Math.abs(currentSheetHeight - sheetSnapHeights.half),
+          hidden: Math.abs(currentSheetHeight - sheetSnapHeights.hidden),
+        };
+
+        if (velocity > 0.5) {
+          // Swiping down
+          if (currentSheetHeight > sheetSnapHeights.half) {
+            targetPosition = 'hidden';
+          } else {
+            targetPosition = 'half';
+          }
+        } else if (velocity < -0.5) {
+          // Swiping up
+          if (currentSheetHeight < sheetSnapHeights.half) {
+            targetPosition = 'full';
+          } else {
+            targetPosition = 'half';
+          }
+        } else {
+          // No velocity, snap to nearest
+          targetPosition = (Object.keys(distances) as Array<'full' | 'half' | 'hidden'>).reduce(
+            (nearest, pos) => distances[pos] < distances[nearest] ? pos : nearest,
+            'full'
+          );
+        }
+
+        setSheetSnapPosition(targetPosition);
+        setCurrentSheetHeight(sheetSnapHeights[targetPosition]);
+        Animated.spring(sheetHeight, {
+          toValue: sheetSnapHeights[targetPosition],
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }).start();
+      },
+      onPanResponderTerminate: () => {
+        setCurrentSheetHeight(sheetSnapHeights[sheetSnapPosition]);
+        Animated.spring(sheetHeight, {
+          toValue: sheetSnapHeights[sheetSnapPosition],
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }).start();
+      },
+    })
+  ).current;
+
+  const gaugeSize = Math.min(220, Math.max(160, screenWidth * 0.42));
+  const cardColumnStyle = screenWidth < 360 ? styles.cardItemFull : styles.cardItem;
+
+  const snapToPosition = useCallback((position: 'full' | 'half' | 'hidden') => {
+    setSheetSnapPosition(position);
+    setSheetVisible(position !== 'hidden');
+    Animated.spring(sheetHeight, {
+      toValue: sheetSnapHeights[position],
+      tension: 50,
+      friction: 7,
+      useNativeDriver: true,
+    }).start();
+  }, [sheetSnapHeights, sheetHeight]);
+
   return (
-    <View style={[styles.screen, { backgroundColor: PALETTE.background }]}>
+    <View style={[styles.screen, { backgroundColor: PALETTE.background }]}> 
       <StatusBar style="light" />
 
       <View style={[
         styles.mapLayer,
-        viewMode === 'dataOnly' && styles.mapLayerHidden
+        viewMode === 'dataOnly' && styles.mapLayerHidden,
+        viewMode === 'focused' && styles.mapLayerFocused
       ]}>
         <MotorcycleMap 
           currentLocation={location} 
           route={route} 
+          navigationRoute={navigationRoute}
           followMode={followMode}
+          navigationActive={navigationActive}
+          onMapLongPress={handleSetRouteDestination}
           onFollowModeToggle={() => setFollowMode(!followMode)}
-          zoomLevel={zoomLevel}
+          zoomLevel={viewMode === 'focused' ? 18 : zoomLevel}
         />
       </View>
 
-      <View style={[styles.topBar, { backgroundColor: PALETTE.card, borderColor: PALETTE.border }]}>
+<View style={[styles.topBar, { backgroundColor: PALETTE.card, borderColor: PALETTE.border }]}> 
         <View style={styles.topTitleBlock}>
-          <Text selectable style={[styles.appTitle, { color: PALETTE.text }]}>
+          <Text selectable style={[styles.appTitle, { color: PALETTE.text }]}> 
             Moto Dashboard
           </Text>
-          <Text selectable numberOfLines={1} style={[styles.appSubtitle, { color: PALETTE.mutedText }]}>
+          <Text selectable numberOfLines={1} style={[styles.appSubtitle, { color: PALETTE.mutedText }]}> 
             {currentCoordinate
               ? `${currentCoordinate.latitude.toFixed(5)}, ${currentCoordinate.longitude.toFixed(5)}`
               : locationError ?? 'GPS stream starting'}
           </Text>
         </View>
-        <View style={[styles.statusBadge, liveStatus === 'Live' ? { backgroundColor: PALETTE.success } : { backgroundColor: PALETTE.card }]}>
-          <Text selectable style={[styles.statusBadgeText, { color: liveStatus === 'Live' ? '#ffffff' : PALETTE.mutedText }]}>
+        <View style={[styles.statusBadge, liveStatus === 'Live' ? { backgroundColor: PALETTE.success } : { backgroundColor: PALETTE.card }]}> 
+          <Text selectable style={[styles.statusBadgeText, { color: liveStatus === 'Live' ? '#ffffff' : PALETTE.mutedText }]}> 
             {liveStatus}
           </Text>
         </View>
       </View>
+
+      <View style={[styles.navigationBar, { backgroundColor: PALETTE.card, borderColor: PALETTE.border }]}> 
+        <Pressable onPress={() => setAppScreen('dashboard')} style={({ pressed }) => [styles.navButton, pressed ? styles.navButtonPressed : null]}> 
+          <Text selectable style={[styles.navButtonText, appScreen === 'dashboard' ? styles.navButtonTextActive : null]}>Dashboard</Text>
+        </Pressable>
+        <Pressable onPress={() => setAppScreen('map')} style={({ pressed }) => [styles.navButton, pressed ? styles.navButtonPressed : null]}> 
+          <Text selectable style={[styles.navButtonText, appScreen === 'map' ? styles.navButtonTextActive : null]}>Map</Text>
+        </Pressable>
+        <Pressable onPress={() => setAppScreen('settings')} style={({ pressed }) => [styles.navButton, pressed ? styles.navButtonPressed : null]}> 
+          <Text selectable style={[styles.navButtonText, appScreen === 'settings' ? styles.navButtonTextActive : null]}>Settings</Text>
+        </Pressable>
+        <Pressable onPress={() => setAppScreen('debug')} style={({ pressed }) => [styles.navButton, pressed ? styles.navButtonPressed : null]}> 
+          <Text selectable style={[styles.navButtonText, appScreen === 'debug' ? styles.navButtonTextActive : null]}>Debug</Text>
+        </Pressable>
+      </View>
+
+{(isMapScreen || navigationActive) && (
+        <View style={[styles.routeSummaryCard, { backgroundColor: PALETTE.card, borderColor: PALETTE.border }]}> 
+          <Text selectable style={[styles.routeCardTitle, { color: PALETTE.text }]}> 
+            {navigationActive ? 'Navigation aktiv' : navigationRoute.length > 1 ? 'Route Vorschau' : 'Route vorbereiten'}
+          </Text>
+          <Text selectable style={[styles.routeCardSubtitle, { color: PALETTE.mutedText }]}> 
+            {routeStatus}
+            {navigationRoute.length > 1 ? ` • ${routeDistanceKm.toFixed(2)} km` : ''}
+          </Text>
+
+          <View style={styles.routeSearchRow}>
+            <TextInput
+              value={destinationQuery}
+              onChangeText={(text) => {
+                setDestinationQuery(text);
+                setSearchError(null);
+              }}
+              onSubmitEditing={searchNavigationDestination}
+              placeholder="Ziel suchen"
+              placeholderTextColor={PALETTE.mutedText}
+              style={[styles.routeSearchInput, { color: PALETTE.text, borderColor: PALETTE.border }]}
+              returnKeyType="search"
+              clearButtonMode="while-editing"
+            />
+            <Pressable
+              onPress={searchNavigationDestination}
+              style={({ pressed }) => [
+                styles.searchButton,
+                { backgroundColor: PALETTE.primary },
+                pressed ? styles.pressedActionButton : null,
+              ]}
+            >
+              {searchLoading ? (
+                <ActivityIndicator color="#ffffff" />
+              ) : (
+                <Text selectable style={styles.searchButtonText}>Suchen</Text>
+              )}
+            </Pressable>
+          </View>
+
+          {searchError ? (
+            <Text selectable style={[styles.searchErrorText, { color: PALETTE.danger }]}>{searchError}</Text>
+          ) : null}
+
+          {destinationResults.length > 0 ? (
+            <View style={styles.searchResultsContainer}>
+              {destinationResults.map((result, index) => (
+                <Pressable
+                  key={`${result.latitude}-${result.longitude}-${index}`}
+                  onPress={() => selectDestinationResult(result)}
+                  style={({ pressed }) => [
+                    styles.searchResultItem,
+                    { backgroundColor: pressed ? PALETTE.border : PALETTE.card },
+                  ]}
+                >
+                  <Text selectable style={[styles.searchResultLabel, { color: PALETTE.text }]}> 
+                    {formatAddressLabel(result)}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+
+          {navigationRoute.length > 1 ? (
+            <View style={styles.routeButtonRow}>
+              <Pressable
+                onPress={() => setNavigationActive((current) => !current)}
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  { backgroundColor: navigationActive ? PALETTE.danger : PALETTE.primary, flex: 1 },
+                  pressed ? styles.pressedActionButton : null,
+                ]}
+              >
+                <Text selectable style={[styles.actionButtonText, { color: '#ffffff' }]}> 
+                  {navigationActive ? 'Navigation stoppen' : 'Navigation starten'}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={clearNavigationRoute}
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  { backgroundColor: PALETTE.card, borderColor: PALETTE.border, flex: 1, marginLeft: 10 },
+                  pressed ? styles.pressedActionButton : null,
+                ]}
+              >
+                <Text selectable style={[styles.secondaryButtonText, { color: PALETTE.text }]}>Ziel löschen</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Text selectable style={[styles.routeInstructionText, { color: PALETTE.mutedText }]}> 
+              Tippe lange auf die Karte oder suche nach einem Ziel, um die Navigation zu starten.
+            </Text>
+          )}
+        </View>
+      )}
 
       <View style={[styles.recordingPill, { backgroundColor: PALETTE.card }]}>
         <View style={[styles.recordingDot, { opacity: rideActive ? 1 : 0.35 }]} />
@@ -472,34 +840,54 @@ export default function App() {
         </Text>
       </View>
 
-      <View style={[
-        styles.bottomSheet, 
-        { backgroundColor: PALETTE.card },
-        viewMode === 'mapOnly' && styles.bottomSheetHidden
-      ]}>
-        <View style={[styles.sheetHandle, { backgroundColor: PALETTE.border }]} />
+      {/* Floating button to show sheet when hidden */}
+      {!sheetVisible && (
+        <Pressable
+          style={styles.floatingSheetButton}
+          onPress={() => snapToPosition('full')}
+        >
+          <Text style={styles.floatingSheetButtonText}>📊</Text>
+        </Pressable>
+      )}
 
-        <View style={styles.panelTabs}>
-          <SegmentButton active={activePanel === 'ride'} label="Ride" onPress={() => setActivePanel('ride')} />
-          <SegmentButton active={activePanel === 'settings'} label="Settings" onPress={() => setActivePanel('settings')} />
-          <SegmentButton active={activePanel === 'debug'} label="Debug" onPress={() => setActivePanel('debug')} />
+      <Animated.View
+        style={[
+          styles.bottomSheet,
+          {
+            backgroundColor: viewMode === 'focused' ? 'rgba(32, 38, 50, 0.95)' : PALETTE.card,
+            transform: [{ translateY: sheetHeight }],
+            maxHeight: screenHeight * 0.85,
+            minHeight: screenHeight * 0.28,
+          },
+          viewMode === 'mapOnly' && styles.bottomSheetHidden,
+        ]}
+      >
+        <View style={styles.sheetHandleWrapper}>
+          <Pressable
+            {...panResponder.panHandlers}
+            onPress={() => snapToPosition(sheetSnapPosition === 'full' ? 'half' : 'full')}
+            style={styles.sheetHandleContainer}
+          >
+            <View style={[styles.sheetHandle, { backgroundColor: PALETTE.border }]} />
+          </Pressable>
         </View>
 
-        {activePanel === 'ride' && (
+        {appScreen === 'dashboard' && (
           <View style={styles.viewModeControls}>
             <Text selectable style={[styles.viewModeLabel, { color: PALETTE.mutedText }]}>View Mode</Text>
             <View style={styles.viewModeButtons}>
               <SegmentButton active={viewMode === 'hybrid'} label="Hybrid" onPress={() => setViewMode('hybrid')} />
               <SegmentButton active={viewMode === 'mapOnly'} label="Map" onPress={() => setViewMode('mapOnly')} />
               <SegmentButton active={viewMode === 'dataOnly'} label="Data" onPress={() => setViewMode('dataOnly')} />
+              <SegmentButton active={viewMode === 'focused'} label="Focused" onPress={() => setViewMode('focused')} />
             </View>
           </View>
         )}
 
-        {activePanel === 'ride' ? (
-          <ScrollView contentContainerStyle={styles.sheetScrollContent} showsVerticalScrollIndicator={false}>
+        {appScreen === 'dashboard' ? (
+          <ScrollView style={[styles.sheetScroll, { maxHeight: screenHeight * 0.72 }]} contentContainerStyle={styles.sheetScrollContent} showsVerticalScrollIndicator={false}>
             <View style={styles.leanGaugeContainer}>
-              <LeanAngleGauge leanAngle={displayLeanAngle} maxLean={sensorState.maxLean} size={180} />
+              <LeanAngleGauge leanAngle={displayLeanAngle} maxLean={sensorState.maxLean} size={gaugeSize} />
               <View style={styles.leanValueContainer}>
                 <Text selectable style={[styles.leanValue, { color: PALETTE.text }]}>
                   {formatSignedMaybeNumber(displayLeanAngle, '°', 1)}
@@ -517,6 +905,7 @@ export default function App() {
                 unit="km/h"
                 detail={speedSource}
                 color={PALETTE.primary}
+                style={cardColumnStyle}
               />
               <DashboardCard
                 title="Distance"
@@ -524,6 +913,7 @@ export default function App() {
                 unit="km"
                 detail={rideActive ? 'Current ride' : 'Ride stopped'}
                 color={PALETTE.success}
+                style={cardColumnStyle}
               />
               <DashboardCard
                 title="Altitude"
@@ -531,12 +921,14 @@ export default function App() {
                 unit="m"
                 detail="GPS altitude"
                 color={PALETTE.warning}
+                style={cardColumnStyle}
               />
               <DashboardCard
                 title="GPS"
                 value={location ? getGpsQuality(gpsAccuracy) : '--'}
                 detail={gpsAccuracy === null ? 'Waiting' : `${Math.round(gpsAccuracy)} m | ${gpsAgeSeconds ?? '--'} s`}
                 color={PALETTE.success}
+                style={cardColumnStyle}
               />
               <DashboardCard
                 title="Max Lean"
@@ -544,6 +936,7 @@ export default function App() {
                 unit="°"
                 detail={`Last corner: ${formatMaybeNumber(sensorState.lastCornerLean, '°', 1)}`}
                 color={PALETTE.accent}
+                style={cardColumnStyle}
               />
               <DashboardCard
                 title="Top Speed"
@@ -551,6 +944,7 @@ export default function App() {
                 unit="km/h"
                 detail="Ride max"
                 color={PALETTE.primary}
+                style={cardColumnStyle}
               />
             </View>
 
@@ -591,8 +985,8 @@ export default function App() {
           </ScrollView>
         ) : null}
 
-        {activePanel === 'settings' ? (
-          <ScrollView contentContainerStyle={styles.sheetScrollContent} showsVerticalScrollIndicator={false}>
+        {appScreen === 'settings' ? (
+          <ScrollView style={[styles.sheetScroll, { maxHeight: screenHeight * 0.72 }]} contentContainerStyle={styles.sheetScrollContent} showsVerticalScrollIndicator={false}>
             <View style={styles.settingSection}>
               <Text selectable style={[styles.settingTitle, { color: PALETTE.text }]}>
                 Theme
@@ -646,7 +1040,7 @@ export default function App() {
           </ScrollView>
         ) : null}
 
-        {activePanel === 'debug' ? (
+        {appScreen === 'debug' ? (
           <SensorDebugView
             debug={sensorState.debug}
             leanAngle={sensorState.leanAngle}
@@ -654,7 +1048,7 @@ export default function App() {
             onSimulateAngle={handleSimulateLeanAngle}
           />
         ) : null}
-      </View>
+      </Animated.View>
     </View>
   );
 }
@@ -671,6 +1065,9 @@ const styles = StyleSheet.create({
     opacity: 0,
     pointerEvents: 'none',
   },
+  mapLayerFocused: {
+    opacity: 0.3,
+  },
   topBar: {
     position: 'absolute',
     left: 18,
@@ -680,7 +1077,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
     borderWidth: 1,
     borderRadius: 12,
     paddingHorizontal: 16,
@@ -689,6 +1085,39 @@ const styles = StyleSheet.create({
   topTitleBlock: {
     flex: 1,
     minWidth: 0,
+  },
+  navigationBar: {
+    position: 'absolute',
+    left: 18,
+    right: 18,
+    top: 122,
+    zIndex: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+  },
+  navButton: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    marginHorizontal: 4,
+    borderRadius: 10,
+  },
+  navButtonPressed: {
+    opacity: 0.7,
+  },
+  navButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#cbd5e1',
+  },
+  navButtonTextActive: {
+    color: '#ffffff',
   },
   appTitle: {
     fontSize: 18,
@@ -715,7 +1144,6 @@ const styles = StyleSheet.create({
     zIndex: 11,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
     borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -725,6 +1153,7 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: PALETTE.danger,
+    marginRight: 8,
   },
   recordingText: {
     fontSize: 12,
@@ -741,7 +1170,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingTop: 12,
     paddingBottom: 28,
-    gap: 16,
+    overflow: 'hidden',
   },
   bottomSheetHidden: {
     transform: [{ translateY: 1000 }],
@@ -752,9 +1181,100 @@ const styles = StyleSheet.create({
     height: 4,
     borderRadius: 2,
   },
+  sheetHandleWrapper: {
+    alignItems: 'center',
+  },
+  sheetHandleContainer: {
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
   panelTabs: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  routeSummaryCard: {
+    position: 'absolute',
+    left: 18,
+    right: 18,
+    top: 190,
+    zIndex: 15,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 16,
+    backgroundColor: PALETTE.card,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  routeCardTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  routeCardSubtitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  routeButtonRow: {
+    flexDirection: 'row',
+    width: '100%',
+  },
+  routeInstructionText: {
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  routeSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
+    marginBottom: 10,
+  },
+  routeSearchInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    backgroundColor: '#111827',
+  },
+  searchButton: {
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  searchButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  searchResultsContainer: {
+    marginBottom: 10,
+  },
+  searchResultItem: {
+    borderWidth: 1,
+    borderColor: PALETTE.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+  },
+  searchResultLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  searchErrorText: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
   },
   viewModeControls: {
     marginTop: 12,
@@ -767,11 +1287,11 @@ const styles = StyleSheet.create({
   },
   viewModeButtons: {
     flexDirection: 'row',
-    gap: 8,
+    justifyContent: 'space-between',
   },
   segmentRow: {
     flexDirection: 'row',
-    gap: 8,
+    justifyContent: 'space-between',
   },
   segmentButton: {
     flex: 1,
@@ -786,7 +1306,10 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   sheetScrollContent: {
-    gap: 16,
+    paddingBottom: 32,
+  },
+  sheetScroll: {
+    flex: 1,
   },
   leanGaugeContainer: {
     alignItems: 'center',
@@ -809,11 +1332,22 @@ const styles = StyleSheet.create({
   cardsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    justifyContent: 'space-between',
+  },
+  cardItem: {
+    flexBasis: '48%',
+    marginBottom: 12,
+  },
+  cardItemFull: {
+    flexBasis: '100%',
+    marginBottom: 12,
   },
   actionRow: {
     flexDirection: 'row',
-    gap: 12,
+    justifyContent: 'space-between',
+  },
+  actionButtonLeft: {
+    marginRight: 12,
   },
   actionButton: {
     flex: 1,
@@ -855,7 +1389,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   settingSection: {
-    gap: 12,
+    marginBottom: 20,
   },
   settingTitle: {
     fontSize: 16,
@@ -865,5 +1399,24 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     lineHeight: 18,
+  },
+  floatingSheetButton: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#60a5fa',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  floatingSheetButtonText: {
+    fontSize: 24,
   },
 });
